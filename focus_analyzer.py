@@ -44,6 +44,7 @@ class FocusAnalyzer:
         ear = (v1 + v2) / (2.0 * h)
         return ear
 
+
     def analyze_eyes(self, landmarks, frame_width: int, frame_height: int) -> dict:
         """
         Главный метод. Принимает сырые точки от MediaPipe, возвращает статус.

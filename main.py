@@ -1,6 +1,7 @@
 import cv2
 import mediapipe.python.solutions.face_mesh as mp_face_mesh
 
+
 # Импортируем наш собственный класс из соседнего файла
 from focus_analyzer import FocusAnalyzer
 
