@@ -1,89 +1,126 @@
 import math
+import cv2
+import numpy as np
 
 
 class FocusAnalyzer:
-    """
-    Класс для анализа состояния пользователя (усталость, фокус).
-    """
-
     def __init__(self):
-        # Порог EAR: если значение ниже, считаем глаз закрытым
+        # --- Настройки EAR (Усталость) ---
         self.EAR_THRESHOLD = 0.20
-        # Сколько кадров подряд глаза должны быть закрыты для фиксации усталости/сна
         self.FATIGUE_FRAMES_LIMIT = 20
-
-        # Внутренний счетчик кадров с закрытыми глазами
         self.closed_frames_counter = 0
-
-        # Индексы 6 точек для каждого глаза из MediaPipe Face Mesh
-        # Порядок точек: левый край, верх-лево, верх-право, правый край, низ-право, низ-лево
         self.LEFT_EYE_INDICES = [33, 160, 158, 133, 153, 144]
         self.RIGHT_EYE_INDICES = [362, 385, 387, 263, 373, 380]
 
-    def _euclidean_distance(self, p1: tuple, p2: tuple) -> float:
-        """Считает расстояние между двумя 2D точками."""
+        # --- Настройки Head Pose (Положение головы) ---
+        self.HEAD_POSE_INDICES = [1, 152, 33, 263, 61, 291]
+        self.face_3d = np.array([
+            [0.0, 0.0, 0.0],  # Нос
+            [0.0, 330.0, -65.0],  # Подбородок
+            [-225.0, -170.0, -135.0],  # Левый край глаза
+            [225.0, -170.0, -135.0],  # Правый край глаза
+            [-150.0, 150.0, -125.0],  # Левый угол рта
+            [150.0, 150.0, -125.0]  # Правый угол рта
+        ], dtype=np.float64)
+
+        # НОВОЕ: Буферы для сглаживания углов (Moving Average)
+        self.pitch_history = []
+        self.yaw_history = []
+        self.SMOOTH_FRAMES = 7  # Усредняем данные за последние 7 кадров
+
+    def _euclidean_distance(self, p1, p2):
         return math.dist(p1, p2)
 
-    def _calculate_ear(self, eye_points: list) -> float:
-        """
-        Вычисляет Eye Aspect Ratio (соотношение сторон глаза).
-        eye_points - список из 6 координат (x, y)
-        """
-        # Вертикальные расстояния
+    def _calculate_ear(self, eye_points):
         v1 = self._euclidean_distance(eye_points[1], eye_points[5])
         v2 = self._euclidean_distance(eye_points[2], eye_points[4])
-
-        # Горизонтальное расстояние
         h = self._euclidean_distance(eye_points[0], eye_points[3])
+        if h == 0: return 0.0
+        return (v1 + v2) / (2.0 * h)
 
-        # Защита от деления на ноль
-        if h == 0:
-            return 0.0
-
-        # Формула EAR
-        ear = (v1 + v2) / (2.0 * h)
-        return ear
-
-
-    def analyze_eyes(self, landmarks, frame_width: int, frame_height: int) -> dict:
-        """
-        Главный метод. Принимает сырые точки от MediaPipe, возвращает статус.
-        """
-
-        # Функция для превращения нормализованных координат в пиксели
+    def analyze_eyes(self, landmarks, frame_width, frame_height):
         def get_coords(indices):
             return [(int(landmarks.landmark[i].x * frame_width),
                      int(landmarks.landmark[i].y * frame_height)) for i in indices]
 
-        left_eye_points = get_coords(self.LEFT_EYE_INDICES)
-        right_eye_points = get_coords(self.RIGHT_EYE_INDICES)
+        left_eye = get_coords(self.LEFT_EYE_INDICES)
+        right_eye = get_coords(self.RIGHT_EYE_INDICES)
+        avg_ear = (self._calculate_ear(left_eye) + self._calculate_ear(right_eye)) / 2.0
 
-        left_ear = self._calculate_ear(left_eye_points)
-        right_ear = self._calculate_ear(right_eye_points)
-
-        # Берем среднее значение обоих глаз
-        avg_ear = (left_ear + right_ear) / 2.0
-
-        # Бизнес-логика: определяем статус
-        status = "В фокусе"
-        color = (0, 255, 0)  # Зеленый
-
+        status, color = "В фокусе", (0, 255, 0)
         if avg_ear < self.EAR_THRESHOLD:
             self.closed_frames_counter += 1
-            status = "Моргание"
-            color = (0, 255, 255)  # Желтый
-
-            # Если глаза закрыты дольше лимита - бьем тревогу
+            status, color = "Моргание", (0, 255, 255)
             if self.closed_frames_counter >= self.FATIGUE_FRAMES_LIMIT:
-                status = "УСТАЛОСТЬ / СОН!"
-                color = (0, 0, 255)  # Красный
+                status, color = "УСТАЛОСТЬ / СОН!", (0, 0, 255)
         else:
-            # Глаза открыты - сбрасываем счетчик
             self.closed_frames_counter = 0
 
-        # Возвращаем словарь с результатами
+        return {"ear": avg_ear, "status": status, "color": color}
+
+    def analyze_head_pose(self, landmarks, frame_width, frame_height):
+        face_2d = []
+        for idx in self.HEAD_POSE_INDICES:
+            pt = landmarks.landmark[idx]
+            x, y = int(pt.x * frame_width), int(pt.y * frame_height)
+            face_2d.append([x, y])
+
+        face_2d = np.array(face_2d, dtype=np.float64)
+
+        focal_length = 1.0 * frame_width
+        cam_matrix = np.array([
+            [focal_length, 0, frame_height / 2],
+            [0, focal_length, frame_width / 2],
+            [0, 0, 1]
+        ])
+        dist_matrix = np.zeros((4, 1), dtype=np.float64)
+
+        success, rot_vec, trans_vec = cv2.solvePnP(self.face_3d, face_2d, cam_matrix, dist_matrix)
+        rmat, _ = cv2.Rodrigues(rot_vec)
+        angles, _, _, _, _, _ = cv2.RQDecomp3x3(rmat)
+
+        # Получаем сырые углы
+        raw_pitch = angles[0]
+        raw_yaw = angles[1]
+
+        # НОВОЕ: Добавляем в историю и удаляем старые кадры, если лимит превышен
+        self.pitch_history.append(raw_pitch)
+        self.yaw_history.append(raw_yaw)
+
+        if len(self.pitch_history) > self.SMOOTH_FRAMES:
+            self.pitch_history.pop(0)
+        if len(self.yaw_history) > self.SMOOTH_FRAMES:
+            self.yaw_history.pop(0)
+
+        # Вычисляем среднее значение (сглаженный угол)
+        pitch = sum(self.pitch_history) / len(self.pitch_history)
+        yaw = sum(self.yaw_history) / len(self.yaw_history)
+
+        direction = "В фокусе (Все четко!)"
+        color = (0, 255, 0)
+
+        # Немного расширил пороги для комфортной работы
+        YAW_THRESHOLD = 20
+        PITCH_DOWN = -15
+        PITCH_UP = 20
+
+        if yaw < -YAW_THRESHOLD:
+            direction = "Отвлекся влево"
+            color = (0, 0, 255)
+        elif yaw > YAW_THRESHOLD:
+            direction = "Отвлекся вправо"
+            color = (0, 0, 255)
+        elif pitch < PITCH_DOWN:
+            direction = "Опустил голову (Телефон?)"
+            color = (0, 255, 255)
+        elif pitch > PITCH_UP:
+            direction = "Смотрит вверх"
+            color = (0, 0, 255)
+
         return {
-            "ear": avg_ear,
-            "status": status,
-            "color": color
+            "pitch": pitch,
+            "yaw": yaw,
+            "direction": direction,
+            "color": color,
+            "nose_2d": face_2d[0]
         }
