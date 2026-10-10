@@ -27,7 +27,6 @@ class FocusAnalyzer:
         self.pitch_history = []
         self.yaw_history = []
         self.SMOOTH_FRAMES = 25  # Увеличили сглаживание для супер-плавности
-
         # --- Система автоматической калибровки ---
         self.is_calibrated = False
         self.calibration_frames = 0
