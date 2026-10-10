@@ -6,7 +6,8 @@ import numpy as np
 class FocusAnalyzer:
     def __init__(self):
         # --- Настройки EAR (Усталость) ---
-        self.EAR_THRESHOLD = 0.20
+        # Порог теперь динамический, рассчитывается при калибровке индивидуально!
+        self.EAR_THRESHOLD = 0.15  # Временный дефолт до калибровки
         self.FATIGUE_FRAMES_LIMIT = 20
         self.closed_frames_counter = 0
         self.LEFT_EYE_INDICES = [33, 160, 158, 133, 153, 144]
@@ -23,18 +24,25 @@ class FocusAnalyzer:
             [150.0, 150.0, -125.0]  # Правый угол рта
         ], dtype=np.float64)
 
-        # Буферы для сглаживания углов
+        # Буферы для сглаживания углов (Увеличили до 25 для максимальной плавности)
         self.pitch_history = []
         self.yaw_history = []
-        self.SMOOTH_FRAMES = 25  # Увеличили сглаживание для супер-плавности
+        self.SMOOTH_FRAMES = 25
+
         # --- Система автоматической калибровки ---
         self.is_calibrated = False
         self.calibration_frames = 0
-        self.CALIBRATION_LIMIT = 25  # Собираем данные 25 кадров (~1-1.5 сек)
+        self.CALIBRATION_LIMIT = 30  # Около 1.5 - 2 секунд для надежного замера
+
+        # Сбор данных для головы
         self.calib_pitch_sum = 0
         self.calib_yaw_sum = 0
         self.offset_pitch = 0.0
         self.offset_yaw = 0.0
+
+        # Сбор данных для ГЛАЗ (Новое!)
+        self.calib_ear_sum = 0
+        self.natural_ear = 0.25  # Естественный размер открытого глаза
 
     def start_recalibration(self):
         """Сброс и запуск калибровки заново"""
@@ -42,6 +50,7 @@ class FocusAnalyzer:
         self.calibration_frames = 0
         self.calib_pitch_sum = 0
         self.calib_yaw_sum = 0
+        self.calib_ear_sum = 0
         print("[КАЛИБРОВКА] Начался сбор данных...")
 
     def _euclidean_distance(self, p1, p2):
@@ -63,7 +72,14 @@ class FocusAnalyzer:
         right_eye = get_coords(self.RIGHT_EYE_INDICES)
         avg_ear = (self._calculate_ear(left_eye) + self._calculate_ear(right_eye)) / 2.0
 
+        # Сбор индивидуального EAR во время калибровки
+        if not self.is_calibrated:
+            self.calib_ear_sum += avg_ear
+            return {"ear": avg_ear, "status": "Калибровка глаз...", "color": (255, 255, 0)}
+
         status, color = "В фокусе", (0, 255, 0)
+
+        # Сравниваем с ИНДИВИДУАЛЬНЫМ порогом
         if avg_ear < self.EAR_THRESHOLD:
             self.closed_frames_counter += 1
             status, color = "Моргание", (0, 255, 255)
@@ -83,7 +99,6 @@ class FocusAnalyzer:
 
         face_2d = np.array(face_2d, dtype=np.float64)
 
-        # ИСПРАВЛЕНО: Правильная матрица камеры (X - width, Y - height)
         focal_length = 1.0 * frame_width
         cam_matrix = np.array([
             [focal_length, 0, frame_width / 2],
@@ -105,13 +120,24 @@ class FocusAnalyzer:
             self.calib_pitch_sum += raw_pitch
             self.calib_yaw_sum += raw_yaw
 
+            # В процессе калибровки мы ТАКЖЕ собираем EAR из analyze_eyes
+            # (это происходит параллельно)
+
             if self.calibration_frames >= self.CALIBRATION_LIMIT:
                 self.offset_pitch = self.calib_pitch_sum / self.CALIBRATION_LIMIT
                 self.offset_yaw = self.calib_yaw_sum / self.CALIBRATION_LIMIT
-                self.is_calibrated = True
-                print(f"[КАЛИБРОВКА] Успешно! Оффсеты: Pitch={self.offset_pitch:.2f}, Yaw={self.offset_yaw:.2f}")
 
-            # Пока идет калибровка, считаем, что всё "ок"
+                # Расчет индивидуального раскрытия глаз (Естественного)
+                self.natural_ear = self.calib_ear_sum / self.CALIBRATION_LIMIT
+
+                # Порог = 65% от нормального состояния глаза человека.
+                # Так мы прощаем сощуривание, узкий разрез и плохое освещение.
+                # Предохранители: не выше 0.21, не ниже 0.12.
+                self.EAR_THRESHOLD = max(0.12, min(self.natural_ear * 0.65, 0.21))
+
+                self.is_calibrated = True
+                print(f"[КАЛИБРОВКА] Успешно! Норма EAR={self.natural_ear:.3f}. Порог={self.EAR_THRESHOLD:.3f}")
+
             return {
                 "pitch": 0.0, "yaw": 0.0,
                 "direction": "Калибровка... (Смотрите прямо)", "color": (255, 255, 0),
@@ -139,10 +165,10 @@ class FocusAnalyzer:
         direction = "В фокусе (Все четко!)"
         color = (0, 255, 0)
 
-        # 4. Проверка условий
-        YAW_THRESHOLD = 18
-        PITCH_DOWN = -12
-        PITCH_UP = 15
+        # Пороги (расширили на повороты для удобства)
+        YAW_THRESHOLD = 20
+        PITCH_DOWN = -14
+        PITCH_UP = 18
 
         if yaw < -YAW_THRESHOLD:
             direction = "Отвлекся влево"
@@ -163,7 +189,6 @@ class FocusAnalyzer:
             "direction": direction,
             "color": color,
             "nose_2d": face_2d[0],
-            # Передаем матрицы дальше для отрисовки 3D вектора
             "rot_vec": rot_vec,
             "trans_vec": trans_vec,
             "cam_matrix": cam_matrix,
