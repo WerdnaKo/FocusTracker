@@ -1,11 +1,13 @@
 import cv2
 import mediapipe.python.solutions.face_mesh as mp_face_mesh
 from focus_analyzer import FocusAnalyzer
+from session_logger import SessionLogger  # НОВОЕ 1: Импортируем логгер
 
 
 def main():
     cap = cv2.VideoCapture(0)
     analyzer = FocusAnalyzer()
+    logger = SessionLogger()  # НОВОЕ 2: Запускаем логгер
 
     with mp_face_mesh.FaceMesh(
             max_num_faces=1,
@@ -28,28 +30,28 @@ def main():
             if results.multi_face_landmarks:
                 face_landmarks = results.multi_face_landmarks[0]
 
-                # --- Анализ усталости (Глаза) ---
                 eye_analysis = analyzer.analyze_eyes(face_landmarks, w, h)
+                head_analysis = analyzer.analyze_head_pose(face_landmarks, w, h)
+
+                # НОВОЕ 3: Отправляем статусы в логгер на каждом кадре
+                logger.log_frame(eye_analysis['status'], head_analysis['direction'])
+
                 cv2.putText(frame, f"Статус: {eye_analysis['status']}", (20, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, eye_analysis['color'], 2)
-
-                # --- Анализ фокуса (Поворот головы) ---
-                head_analysis = analyzer.analyze_head_pose(face_landmarks, w, h)
                 cv2.putText(frame, f"Фокус: {head_analysis['direction']}", (20, 80),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, head_analysis['color'], 2)
 
-                # Выводим точные градусы для отладки и демонстрации жюри
-                cv2.putText(frame, f"Pitch (В/Н): {int(head_analysis['pitch'])}", (w - 200, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-                cv2.putText(frame, f"Yaw (Л/П): {int(head_analysis['yaw'])}", (w - 200, 70),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-
             cv2.imshow("Focus Tracker MVP", frame)
+
+            # Если нажали ESC (код 27) - выходим из цикла
             if cv2.waitKey(1) & 0xFF == 27:
                 break
 
     cap.release()
     cv2.destroyAllWindows()
+
+    # НОВОЕ 4: Выводим финальный отчет, когда закрыли камеру
+    logger.generate_report()
 
 
 if __name__ == "__main__":
