@@ -6,9 +6,8 @@ import numpy as np
 class FocusAnalyzer:
     def __init__(self):
         # --- Настройки EAR (Усталость) ---
-        # Порог теперь динамический, рассчитывается при калибровке индивидуально!
-        self.EAR_THRESHOLD = 0.15  # Временный дефолт до калибровки
-        self.FATIGUE_FRAMES_LIMIT = 20
+        self.EAR_THRESHOLD = 0.18  # Дефолт до калибровки
+        self.FATIGUE_FRAMES_LIMIT = 15  # УМЕНЬШИЛИ! Теперь быстрее ловит засыпание
         self.closed_frames_counter = 0
         self.LEFT_EYE_INDICES = [33, 160, 158, 133, 153, 144]
         self.RIGHT_EYE_INDICES = [362, 385, 387, 263, 373, 380]
@@ -16,41 +15,41 @@ class FocusAnalyzer:
         # --- Настройки Head Pose (Положение головы) ---
         self.HEAD_POSE_INDICES = [1, 152, 33, 263, 61, 291]
         self.face_3d = np.array([
-            [0.0, 0.0, 0.0],  # Нос
-            [0.0, 330.0, -65.0],  # Подбородок
-            [-225.0, -170.0, -135.0],  # Левый край глаза
-            [225.0, -170.0, -135.0],  # Правый край глаза
-            [-150.0, 150.0, -125.0],  # Левый угол рта
-            [150.0, 150.0, -125.0]  # Правый угол рта
+            [0.0, 0.0, 0.0],
+            [0.0, 330.0, -65.0],
+            [-225.0, -170.0, -135.0],
+            [225.0, -170.0, -135.0],
+            [-150.0, 150.0, -125.0],
+            [150.0, 150.0, -125.0]
         ], dtype=np.float64)
 
-        # Буферы для сглаживания углов (Увеличили до 25 для максимальной плавности)
         self.pitch_history = []
         self.yaw_history = []
         self.SMOOTH_FRAMES = 25
 
-        # --- Система автоматической калибровки ---
         self.is_calibrated = False
         self.calibration_frames = 0
-        self.CALIBRATION_LIMIT = 30  # Около 1.5 - 2 секунд для надежного замера
+        self.CALIBRATION_LIMIT = 30
 
-        # Сбор данных для головы
         self.calib_pitch_sum = 0
         self.calib_yaw_sum = 0
         self.offset_pitch = 0.0
         self.offset_yaw = 0.0
 
-        # Сбор данных для ГЛАЗ (Новое!)
         self.calib_ear_sum = 0
-        self.natural_ear = 0.25  # Естественный размер открытого глаза
+        self.natural_ear = 0.25
+
+        # НОВОЕ: Храним последние углы головы для защиты глаз от искажений
+        self.last_yaw = 0.0
+        self.last_pitch = 0.0
 
     def start_recalibration(self):
-        """Сброс и запуск калибровки заново"""
         self.is_calibrated = False
         self.calibration_frames = 0
         self.calib_pitch_sum = 0
         self.calib_yaw_sum = 0
         self.calib_ear_sum = 0
+        self.closed_frames_counter = 0
         print("[КАЛИБРОВКА] Начался сбор данных...")
 
     def _euclidean_distance(self, p1, p2):
@@ -72,14 +71,18 @@ class FocusAnalyzer:
         right_eye = get_coords(self.RIGHT_EYE_INDICES)
         avg_ear = (self._calculate_ear(left_eye) + self._calculate_ear(right_eye)) / 2.0
 
-        # Сбор индивидуального EAR во время калибровки
         if not self.is_calibrated:
             self.calib_ear_sum += avg_ear
             return {"ear": avg_ear, "status": "Калибровка глаз...", "color": (255, 255, 0)}
 
+        # ИСПРАВЛЕНИЕ 1: Блокируем ложные моргания при повороте головы!
+        # Если голова повернута больше чем на 18 градусов, EAR искажается.
+        if abs(self.last_yaw) > 18 or abs(self.last_pitch) > 18:
+            self.closed_frames_counter = 0  # Сбрасываем счетчик усталости
+            return {"ear": avg_ear, "status": "Не видно (Поворот)", "color": (128, 128, 128)}
+
         status, color = "В фокусе", (0, 255, 0)
 
-        # Сравниваем с ИНДИВИДУАЛЬНЫМ порогом
         if avg_ear < self.EAR_THRESHOLD:
             self.closed_frames_counter += 1
             status, color = "Моргание", (0, 255, 255)
@@ -114,42 +117,33 @@ class FocusAnalyzer:
         raw_pitch = angles[0]
         raw_yaw = angles[1]
 
-        # 1. Автоматическая калибровка в первые кадры
         if not self.is_calibrated:
             self.calibration_frames += 1
             self.calib_pitch_sum += raw_pitch
             self.calib_yaw_sum += raw_yaw
 
-            # В процессе калибровки мы ТАКЖЕ собираем EAR из analyze_eyes
-            # (это происходит параллельно)
-
             if self.calibration_frames >= self.CALIBRATION_LIMIT:
                 self.offset_pitch = self.calib_pitch_sum / self.CALIBRATION_LIMIT
                 self.offset_yaw = self.calib_yaw_sum / self.CALIBRATION_LIMIT
-
-                # Расчет индивидуального раскрытия глаз (Естественного)
                 self.natural_ear = self.calib_ear_sum / self.CALIBRATION_LIMIT
 
-                # Порог = 65% от нормального состояния глаза человека.
-                # Так мы прощаем сощуривание, узкий разрез и плохое освещение.
-                # Предохранители: не выше 0.21, не ниже 0.12.
-                self.EAR_THRESHOLD = max(0.12, min(self.natural_ear * 0.65, 0.21))
+                # ИСПРАВЛЕНИЕ 2: Сделали алгоритм более чувствительным к морганиям
+                # Теперь порог = 80% от нормального открытого глаза (было 65%)
+                # И поставили жесткий минимум 0.16, чтобы не проваливался.
+                self.EAR_THRESHOLD = max(0.16, min(self.natural_ear * 0.80, 0.23))
 
                 self.is_calibrated = True
-                print(f"[КАЛИБРОВКА] Успешно! Норма EAR={self.natural_ear:.3f}. Порог={self.EAR_THRESHOLD:.3f}")
 
             return {
                 "pitch": 0.0, "yaw": 0.0,
-                "direction": "Калибровка... (Смотрите прямо)", "color": (255, 255, 0),
+                "direction": "Калибровка...", "color": (255, 255, 0),
                 "nose_2d": face_2d[0], "rot_vec": rot_vec, "trans_vec": trans_vec, "cam_matrix": cam_matrix,
                 "dist_matrix": dist_matrix
             }
 
-        # 2. Вычитаем калибровочные сдвиги
         calibrated_pitch = raw_pitch - self.offset_pitch
         calibrated_yaw = raw_yaw - self.offset_yaw
 
-        # 3. Добавляем в буфер сглаживания
         self.pitch_history.append(calibrated_pitch)
         self.yaw_history.append(calibrated_yaw)
 
@@ -158,14 +152,16 @@ class FocusAnalyzer:
         if len(self.yaw_history) > self.SMOOTH_FRAMES:
             self.yaw_history.pop(0)
 
-        # Итоговые плавные углы
         pitch = sum(self.pitch_history) / len(self.pitch_history)
         yaw = sum(self.yaw_history) / len(self.yaw_history)
+
+        # НОВОЕ: Сохраняем углы для следующего кадра (чтобы функция глаз знала о повороте)
+        self.last_pitch = pitch
+        self.last_yaw = yaw
 
         direction = "В фокусе (Все четко!)"
         color = (0, 255, 0)
 
-        # Пороги (расширили на повороты для удобства)
         YAW_THRESHOLD = 20
         PITCH_DOWN = -14
         PITCH_UP = 18
