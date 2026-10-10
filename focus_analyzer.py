@@ -23,10 +23,27 @@ class FocusAnalyzer:
             [150.0, 150.0, -125.0]  # Правый угол рта
         ], dtype=np.float64)
 
-        # НОВОЕ: Буферы для сглаживания углов (Moving Average)
+        # Буферы для сглаживания углов
         self.pitch_history = []
         self.yaw_history = []
-        self.SMOOTH_FRAMES = 7  # Усредняем данные за последние 7 кадров
+        self.SMOOTH_FRAMES = 25  # Увеличили сглаживание для супер-плавности
+
+        # --- Система автоматической калибровки ---
+        self.is_calibrated = False
+        self.calibration_frames = 0
+        self.CALIBRATION_LIMIT = 25  # Собираем данные 25 кадров (~1-1.5 сек)
+        self.calib_pitch_sum = 0
+        self.calib_yaw_sum = 0
+        self.offset_pitch = 0.0
+        self.offset_yaw = 0.0
+
+    def start_recalibration(self):
+        """Сброс и запуск калибровки заново"""
+        self.is_calibrated = False
+        self.calibration_frames = 0
+        self.calib_pitch_sum = 0
+        self.calib_yaw_sum = 0
+        print("[КАЛИБРОВКА] Начался сбор данных...")
 
     def _euclidean_distance(self, p1, p2):
         return math.dist(p1, p2)
@@ -67,42 +84,66 @@ class FocusAnalyzer:
 
         face_2d = np.array(face_2d, dtype=np.float64)
 
+        # ИСПРАВЛЕНО: Правильная матрица камеры (X - width, Y - height)
         focal_length = 1.0 * frame_width
         cam_matrix = np.array([
-            [focal_length, 0, frame_height / 2],
-            [0, focal_length, frame_width / 2],
+            [focal_length, 0, frame_width / 2],
+            [0, focal_length, frame_height / 2],
             [0, 0, 1]
-        ])
+        ], dtype=np.float64)
         dist_matrix = np.zeros((4, 1), dtype=np.float64)
 
         success, rot_vec, trans_vec = cv2.solvePnP(self.face_3d, face_2d, cam_matrix, dist_matrix)
         rmat, _ = cv2.Rodrigues(rot_vec)
         angles, _, _, _, _, _ = cv2.RQDecomp3x3(rmat)
 
-        # Получаем сырые углы
         raw_pitch = angles[0]
         raw_yaw = angles[1]
 
-        # НОВОЕ: Добавляем в историю и удаляем старые кадры, если лимит превышен
-        self.pitch_history.append(raw_pitch)
-        self.yaw_history.append(raw_yaw)
+        # 1. Автоматическая калибровка в первые кадры
+        if not self.is_calibrated:
+            self.calibration_frames += 1
+            self.calib_pitch_sum += raw_pitch
+            self.calib_yaw_sum += raw_yaw
+
+            if self.calibration_frames >= self.CALIBRATION_LIMIT:
+                self.offset_pitch = self.calib_pitch_sum / self.CALIBRATION_LIMIT
+                self.offset_yaw = self.calib_yaw_sum / self.CALIBRATION_LIMIT
+                self.is_calibrated = True
+                print(f"[КАЛИБРОВКА] Успешно! Оффсеты: Pitch={self.offset_pitch:.2f}, Yaw={self.offset_yaw:.2f}")
+
+            # Пока идет калибровка, считаем, что всё "ок"
+            return {
+                "pitch": 0.0, "yaw": 0.0,
+                "direction": "Калибровка... (Смотрите прямо)", "color": (255, 255, 0),
+                "nose_2d": face_2d[0], "rot_vec": rot_vec, "trans_vec": trans_vec, "cam_matrix": cam_matrix,
+                "dist_matrix": dist_matrix
+            }
+
+        # 2. Вычитаем калибровочные сдвиги
+        calibrated_pitch = raw_pitch - self.offset_pitch
+        calibrated_yaw = raw_yaw - self.offset_yaw
+
+        # 3. Добавляем в буфер сглаживания
+        self.pitch_history.append(calibrated_pitch)
+        self.yaw_history.append(calibrated_yaw)
 
         if len(self.pitch_history) > self.SMOOTH_FRAMES:
             self.pitch_history.pop(0)
         if len(self.yaw_history) > self.SMOOTH_FRAMES:
             self.yaw_history.pop(0)
 
-        # Вычисляем среднее значение (сглаженный угол)
+        # Итоговые плавные углы
         pitch = sum(self.pitch_history) / len(self.pitch_history)
         yaw = sum(self.yaw_history) / len(self.yaw_history)
 
         direction = "В фокусе (Все четко!)"
         color = (0, 255, 0)
 
-        # Немного расширил пороги для комфортной работы
-        YAW_THRESHOLD = 20
-        PITCH_DOWN = -15
-        PITCH_UP = 20
+        # 4. Проверка условий
+        YAW_THRESHOLD = 18
+        PITCH_DOWN = -12
+        PITCH_UP = 15
 
         if yaw < -YAW_THRESHOLD:
             direction = "Отвлекся влево"
@@ -122,5 +163,10 @@ class FocusAnalyzer:
             "yaw": yaw,
             "direction": direction,
             "color": color,
-            "nose_2d": face_2d[0]
+            "nose_2d": face_2d[0],
+            # Передаем матрицы дальше для отрисовки 3D вектора
+            "rot_vec": rot_vec,
+            "trans_vec": trans_vec,
+            "cam_matrix": cam_matrix,
+            "dist_matrix": dist_matrix
         }
