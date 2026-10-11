@@ -1,0 +1,43 @@
+name: Build Windows Executables
+
+on:
+  workflow_dispatch: # Запуск вручную по кнопке в GitHub
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Скачивание репозитория
+        uses: actions/checkout@v4
+
+      - name: Установка Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Установка зависимостей и PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Сборка приложения Ученика (FocusStudent.exe)
+        run: |
+          pyinstaller --noconfirm --onedir --windowed --collect-all customtkinter --collect-all mediapipe --name "FocusStudent" client_student.py
+
+      - name: Сборка сервера Учителя (FocusTeacher.exe)
+        run: |
+          pyinstaller --noconfirm --onedir --windowed --collect-all customtkinter --name "FocusTeacher" server_teacher.py
+
+      - name: Сохранение архива с приложением Ученика
+        uses: actions/upload-artifact@v4
+        with:
+          name: FocusStudent-Windows
+          path: dist/FocusStudent/
+
+      - name: Сохранение архива с приложением Учителя
+        uses: actions/upload-artifact@v4
+        with:
+          name: FocusTeacher-Windows
+          path: dist/FocusTeacher/
